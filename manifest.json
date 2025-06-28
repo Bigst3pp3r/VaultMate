@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "VaultMate Password Assist",
+  "name": "VaultMate",
   "version": "0.1",
   "description": "Detects password fields and offers to generate secure passwords.",
   "permissions": ["scripting", "storage"],
