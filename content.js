@@ -60,18 +60,7 @@ passwordFields.forEach((field, index) => {
   document.body.appendChild(btn);
 });
 
-// Simple generator (reused from popup)
-function generatePassword(length) {
-  const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-=";
-  let password = "";
-  const array = new Uint32Array(length);
-  window.crypto.getRandomValues(array);
-  for (let i = 0; i < length; i++) {
-    password += charset[array[i] % charset.length];
-  }
-  return password;
-}
-
+// Function to encrypt a password using the master password
 async function encryptPassword(masterPassword, plaintext) {
   const encoder = new TextEncoder();
 
@@ -110,4 +99,89 @@ async function encryptPassword(masterPassword, plaintext) {
     iv: Array.from(iv)
   };
 }
+
+// Function to decrypt a password using the master password
+async function decryptPassword(masterPassword, encryptedObj) { // Ensure encryptedObj is in the expected format
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder(); // Use TextEncoder for consistent encoding
+
+  const { ciphertext, salt, iv } = encryptedObj;
+
+  const keyMaterial = await window.crypto.subtle.importKey( 
+    "raw",
+    encoder.encode(masterPassword),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
+  ); // Import the master password as a key material
+
+  const key = await window.crypto.subtle.deriveKey(
+    {
+      name: "PBKDF2",
+      salt: new Uint8Array(salt),
+      iterations: 250000,
+      hash: "SHA-256"
+    },
+    keyMaterial,
+    { name: "AES-GCM", length: 256 },
+    true,
+    ["decrypt"]
+  ); // Derive the decryption key
+
+  const decrypted = await window.crypto.subtle.decrypt(
+    { name: "AES-GCM", iv: new Uint8Array(iv) },
+    key,
+    Uint8Array.from(atob(ciphertext), c => c.charCodeAt(0))
+  );
+
+  return decoder.decode(decrypted);
+} 
+
+
+// Simple generator (reused from popup)
+function generatePassword(length) {
+  const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-=";
+  let password = "";
+  const array = new Uint32Array(length);
+  window.crypto.getRandomValues(array);
+  for (let i = 0; i < length; i++) {
+    password += charset[array[i] % charset.length];
+  }
+  return password;
+}
+
+// Auto-fill functionality
+(async function autoFillVaultmate() {
+  const site = window.location.origin;
+
+  // Get vault data for current site
+  chrome.storage.local.get(["vault_data"], async (res) => {
+    const vault = res.vault_data || {};
+    const entries = vault[site];
+
+    if (!entries || entries.length === 0) return;
+
+    // Ask for master password
+    const masterPassword = prompt("VaultMate: Enter master password to autofill");
+
+    if (!masterPassword) return;
+
+    // Decrypt the first password match (for now)
+    const latest = entries[entries.length - 1];
+
+    try {
+      const decrypted = await decryptPassword(masterPassword, latest.password);
+
+      // Autofill the first password field found
+      const field = document.querySelector('input[type="password"]');
+      if (field) {
+        field.value = decrypted;
+        console.log("🔓 VaultMate autofilled password");
+      }
+    } catch (err) {
+      console.error("❌ VaultMate failed to decrypt:", err);
+      alert("VaultMate: Wrong master password or corrupt data.");
+    }
+  });
+})();
 
