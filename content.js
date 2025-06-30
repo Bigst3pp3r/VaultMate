@@ -1,5 +1,44 @@
 console.log("🔍 VaultMate content script loaded."); 
 
+// Check if the vault is unlocked
+// If not, prompt for master password and unlock
+function checkVaultUnlocked() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: "IS_VAULT_UNLOCKED" }, (res) => {
+      resolve(res.unlocked);
+    });
+  });
+}
+// Ensure the vault is unlocked before proceeding
+async function ensureVaultUnlocked() {
+  const isUnlocked = await checkVaultUnlocked();
+
+  if (!isUnlocked) {
+    const masterPassword = prompt("VaultMate: Enter master password");
+    if (!masterPassword) return null;
+
+    // Store unlock session
+    await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: "UNLOCK_VAULT", key: masterPassword }, () => {
+        resolve();
+      });
+    });
+
+    return masterPassword;
+  }
+
+  // If unlocked, retrieve stored master key from memory
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: "GET_UNLOCK_KEY" }, (res) => {
+      resolve(res.key);
+    });
+  });
+}
+
+
+
+
+
 // Look for password fields
 const passwordFields = document.querySelectorAll('input[type="password"]');
 
@@ -154,58 +193,27 @@ function generatePassword(length) {
 (async function autoFillVaultmate() {
   const site = window.location.origin;
 
-  // Get vault data for current site
-  chrome.storage.local.get(["vault_data"], async (res) => {
-    const vault = res.vault_data || {};
-    const entries = vault[site];
+ chrome.storage.local.get(["vault_data"], async (res) => {
+  const vault = res.vault_data || {};
+  const entries = vault[window.location.origin];
+  if (!entries || entries.length === 0) return;
 
-    if (!entries || entries.length === 0) return;
+  // 🔐 Ask for master password or use existing unlocked session
+  const masterKey = await ensureVaultUnlocked();
+  if (!masterKey) return; // user cancelled or invalid
 
-    // Ask for master password
-    const masterPassword = prompt("VaultMate: Enter master password to autofill");
-
-    if (!masterPassword) return;
-
-    // Decrypt the first password match (for now)
-    const latest = entries[entries.length - 1];
-
-    try {
-      const decrypted = await decryptPassword(masterPassword, latest.password);
-
-      // Autofill the first password field found
-      const field = document.querySelector('input[type="password"]');
-      if (field) {
-        field.value = decrypted;
-        console.log("🔓 VaultMate autofilled password");
-      }
-    } catch (err) {
-      console.error("❌ VaultMate failed to decrypt:", err);
-      alert("VaultMate: Wrong master password or corrupt data.");
+  // Proceed to decrypt the latest password
+  const latest = entries[entries.length - 1];
+  try {
+    const decrypted = await decryptPassword(masterKey, latest.password);
+    const field = document.querySelector('input[type="password"]');
+    if (field) {
+      field.value = decrypted;
+      console.log("🔓 VaultMate autofilled password");
     }
+  } catch (err) {
+    console.error("❌ VaultMate failed to decrypt:", err);
+    alert("VaultMate: Incorrect master password or corrupt data.");
+  }
   });
 })();
-
-// Check if vault is unlocked before allowing any operations
-function checkVaultUnlocked() {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: "IS_VAULT_UNLOCKED" }, (res) => {
-      resolve(res.unlocked);
-    });
-  });
-}
-
-// Check if vault is unlocked before outofill 
-const isUnlocked = await checkVaultUnlocked();
-
-if (!isUnlocked) {
-  const masterPassword = prompt("VaultMate: Enter master password");
-  if (!masterPassword) return;
-
-  // Derive unlock key and pass to background
-  chrome.runtime.sendMessage({ type: "UNLOCK_VAULT", key: masterPassword }, () => {
-    // Continue with decryption
-  });
-} else {
-  // Continue with autofill silently
-}
-
