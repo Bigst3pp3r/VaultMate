@@ -185,3 +185,27 @@ function generatePassword(length) {
   });
 })();
 
+// Check if vault is unlocked before allowing any operations
+function checkVaultUnlocked() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: "IS_VAULT_UNLOCKED" }, (res) => {
+      resolve(res.unlocked);
+    });
+  });
+}
+
+// Check if vault is unlocked before outofill 
+const isUnlocked = await checkVaultUnlocked();
+
+if (!isUnlocked) {
+  const masterPassword = prompt("VaultMate: Enter master password");
+  if (!masterPassword) return;
+
+  // Derive unlock key and pass to background
+  chrome.runtime.sendMessage({ type: "UNLOCK_VAULT", key: masterPassword }, () => {
+    // Continue with decryption
+  });
+} else {
+  // Continue with autofill silently
+}
+
