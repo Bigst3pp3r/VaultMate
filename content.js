@@ -99,6 +99,32 @@ passwordFields.forEach((field, index) => {
   document.body.appendChild(btn);
 });
 
+// Observe changes to password fields
+// to handle unmasking securely
+passwordFields.forEach((field) => {
+  const observer = new MutationObserver(async (mutations) => {
+    for (const mutation of mutations) {
+      if (
+        mutation.attributeName === "type" &&
+        field.type === "text" &&
+        !field.dataset.vaultmateUnmasked
+      ) {
+        // Block unmasking until verified
+        const key = await ensureVaultUnlocked();
+        if (key) {
+          field.dataset.vaultmateUnmasked = "true"; // allow once
+        } else {
+          field.type = "password"; // revert if not authorized
+          alert("VaultMate: Unlock required to view password.");
+        }
+      }
+    }
+  });
+
+  observer.observe(field, { attributes: true });
+});
+
+
 // Function to encrypt a password using the master password
 async function encryptPassword(masterPassword, plaintext) {
   const encoder = new TextEncoder();
