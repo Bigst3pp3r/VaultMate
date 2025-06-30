@@ -87,7 +87,7 @@ async function encryptPassword(masterPassword, plaintext) {
     {
       name: "PBKDF2",
       salt: salt,
-      iterations: 100000,
+      iterations: 300000,
       hash: "SHA-256"
     },
     keyMaterial,
