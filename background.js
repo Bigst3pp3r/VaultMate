@@ -1,10 +1,11 @@
-let unlockKey = null; // Stored in memory (not persisted)
+const MASTER_KEY_REQUIRED = false;
 
-// Listen for messages from content script or popup
+let unlockKey = MASTER_KEY_REQUIRED ? null : "VAULTMATE_DEV_KEY"; // Temporary static key if no prompt
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // 🔓 Handle vault unlock request
+  // 🔓 Unlock vault manually
   if (msg.type === "UNLOCK_VAULT") {
-    console.log("🔓 Unlocking vault with master password");
+    console.log("🔓 Unlocking vault manually");
     unlockKey = msg.key;
 
     const state = {
@@ -18,51 +19,31 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ success: true });
     });
 
-    return true; // Keep message channel open for async response
+    return true;
   }
 
   // 📡 Check if vault is unlocked
   if (msg.type === "IS_VAULT_UNLOCKED") {
+    if (!MASTER_KEY_REQUIRED) {
+      return sendResponse({ unlocked: true }); // Always unlocked if disabled
+    }
+
     chrome.storage.session.get("vault_state", (res) => {
       const state = res.vault_state;
-      console.log("🔍 Checking vault session:", state);
       if (!state) return sendResponse({ unlocked: false });
 
       const now = Date.now();
-      const elapsed = (now - state.unlocked_at) / 60000; // Minutes
+      const elapsed = (now - state.unlocked_at) / 60000;
       const isValid = elapsed <= state.timeout_minutes;
 
-      console.log(`🕒 Session valid? ${isValid} (${elapsed.toFixed(2)} min elapsed)`);
       sendResponse({ unlocked: isValid });
     });
 
-    return true; // async
+    return true;
   }
 
-  // 🔑 Retrieve unlock key (only if still in memory)
+  // 🔑 Get master key
   if (msg.type === "GET_UNLOCK_KEY") {
-  if (unlockKey) {
-    console.log("🔑 Unlock key already in memory.");
-    return sendResponse({ key: unlockKey });
-  }
-
-  // Re-prompt user only to derive key again
-  chrome.storage.session.get("vault_state", async (res) => {
-    const state = res.vault_state;
-
-    if (!state || !state.vault_unlocked) {
-      return sendResponse({ key: null });
-    }
-
-    // Ask user again only to derive key
-    const userPassword = prompt("VaultMate: Please re-enter your master password (session resumed)");
-    if (!userPassword) return sendResponse({ key: null });
-
-    unlockKey = userPassword;
     sendResponse({ key: unlockKey });
-  });
-
-  return true; // Keep message channel open
-}
-
+  }
 });

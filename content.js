@@ -1,49 +1,48 @@
-console.log("🔍 VaultMate content script loaded."); 
+const MASTER_KEY_REQUIRED = false;
+const STATIC_DEV_KEY = "VAULTMATE_DEV_KEY";
 
-// Check if the vault is unlocked
-// If not, prompt for master password and unlock
-function checkVaultUnlocked() {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: "IS_VAULT_UNLOCKED" }, (res) => {
-      resolve(res.unlocked);
-    });
-  });
+console.log("🔍 VaultMate content script loaded.");
+
+// Encryption Key Resolver
+async function getEncryptionKey() {
+  if (!MASTER_KEY_REQUIRED) return STATIC_DEV_KEY;
+
+  return await ensureVaultUnlocked();
 }
-// Ensure the vault is unlocked before proceeding
+
+// Get master key from background (only used if needed)
 async function ensureVaultUnlocked() {
-  const isUnlocked = await checkVaultUnlocked();
+  const isUnlocked = await new Promise((resolve) =>
+    chrome.runtime.sendMessage({ type: "IS_VAULT_UNLOCKED" }, (res) =>
+      resolve(res.unlocked)
+    )
+  );
 
   if (!isUnlocked) {
     const masterPassword = prompt("VaultMate: Enter master password");
     if (!masterPassword) return null;
 
-    // Store unlock session
-    await new Promise((resolve) => {
-      chrome.runtime.sendMessage({ type: "UNLOCK_VAULT", key: masterPassword }, () => {
-        resolve();
-      });
-    });
+    await new Promise((resolve) =>
+      chrome.runtime.sendMessage(
+        { type: "UNLOCK_VAULT", key: masterPassword },
+        () => resolve()
+      )
+    );
 
     return masterPassword;
   }
 
-  // If unlocked, retrieve stored master key from memory
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: "GET_UNLOCK_KEY" }, (res) => {
-      resolve(res.key);
-    });
-  });
+  return await new Promise((resolve) =>
+    chrome.runtime.sendMessage({ type: "GET_UNLOCK_KEY" }, (res) =>
+      resolve(res.key)
+    )
+  );
 }
 
-
-
-
-
-// Look for password fields
+// --- Detect Password Fields and Inject Button ---
 const passwordFields = document.querySelectorAll('input[type="password"]');
 
-passwordFields.forEach((field, index) => {
-  // Skip if already injected
+passwordFields.forEach((field) => {
   if (field.dataset.vaultmateInjected) return;
 
   field.dataset.vaultmateInjected = "true";
@@ -51,56 +50,92 @@ passwordFields.forEach((field, index) => {
   const btn = document.createElement("button");
   btn.innerText = "🔒";
   btn.title = "Generate Password";
-  btn.style.position = "absolute";
-  btn.style.zIndex = "1000";
-  btn.style.padding = "4px 6px";
-  btn.style.borderRadius = "4px";
-  btn.style.border = "none";
-  btn.style.cursor = "pointer";
-  btn.style.background = "#00bfff";
-  btn.style.color = "#fff";
-  btn.style.fontSize = "12px";
+  Object.assign(btn.style, {
+    position: "absolute",
+    zIndex: "1000",
+    padding: "4px 6px",
+    borderRadius: "4px",
+    border: "none",
+    cursor: "pointer",
+    background: "#00bfff",
+    color: "#fff",
+    fontSize: "12px"
+  });
 
-  // Position button next to the field
   const rect = field.getBoundingClientRect();
   btn.style.top = `${window.scrollY + rect.top}px`;
   btn.style.left = `${window.scrollX + rect.right + 5}px`;
 
   btn.addEventListener("click", async () => {
-  const generatedPassword = generatePassword(16);
-  field.value = generatedPassword;
+    const password = generatePassword(16);
+    field.value = password;
 
-  // Ask for master password (basic prompt for now)
-  const masterPassword = prompt("Enter your VaultMate master password:");
-  if (!masterPassword) return;
+    const key = await getEncryptionKey();
+    if (!key) return;
 
-  // Encrypt the password
-  const encryptedData = await encryptPassword(masterPassword, generatedPassword);
+    const usernameField = document.querySelector(
+      'input[type="email"], input[name*="user"], input[name*="email"], input[name*="login"], input[type="text"]'
+    );
+    const username = usernameField ? usernameField.value : null;
 
-  // Store it locally (keyed by site origin for now)
-  const site = window.location.origin;
-  chrome.storage.local.get(["vault_data"], (res) => {
-    const vault = res.vault_data || {};
-    if (!vault[site]) vault[site] = [];
+    const encryptedPassword = await encryptPassword(key, password);
+    const encryptedUsername = username ? await encryptPassword(key, username) : null;
 
-    vault[site].push({
-      password: encryptedData,
-      created_at: new Date().toISOString()
-    });
+    const site = window.location.origin;
+    chrome.storage.local.get(["vault_data"], (res) => {
+      const vault = res.vault_data || {};
+      if (!vault[site]) vault[site] = [];
 
-    chrome.storage.local.set({ vault_data: vault }, () => {
-      console.log("🔒 Password saved securely for", site);
+      vault[site].push({
+        password: encryptedPassword,
+        username: encryptedUsername,
+        created_at: new Date().toISOString()
+      });
+
+      chrome.storage.local.set({ vault_data: vault }, () => {
+        console.log("🔐 Credentials saved for", site);
+      });
     });
   });
-});
 
-
-  // Insert into page
   document.body.appendChild(btn);
 });
 
-// Observe changes to password fields
-// to handle unmasking securely
+// --- Autofill ---
+(async function autoFillVaultmate() {
+  const site = window.location.origin;
+
+  chrome.storage.local.get(["vault_data"], async (res) => {
+    const vault = res.vault_data || {};
+    const entries = vault[site];
+    if (!entries || entries.length === 0) return;
+
+    const key = await getEncryptionKey();
+    if (!key) return;
+
+    const latest = entries[entries.length - 1];
+    try {
+      const decryptedPassword = await decryptPassword(key, latest.password);
+      const decryptedUsername = latest.username
+        ? await decryptPassword(key, latest.username)
+        : null;
+
+      const passField = document.querySelector('input[type="password"]');
+      if (passField) passField.value = decryptedPassword;
+
+      const userField = document.querySelector(
+        'input[type="email"], input[name*="user"], input[name*="email"], input[name*="login"], input[type="text"]'
+      );
+      if (userField && decryptedUsername) userField.value = decryptedUsername;
+
+      console.log("🔓 VaultMate autofilled");
+    } catch (err) {
+      console.error("❌ Autofill decryption failed", err);
+    }
+  });
+})();
+
+// --- Unmask Protection (kept with master key) ---
 passwordFields.forEach((field) => {
   const observer = new MutationObserver(async (mutations) => {
     for (const mutation of mutations) {
@@ -109,12 +144,11 @@ passwordFields.forEach((field) => {
         field.type === "text" &&
         !field.dataset.vaultmateUnmasked
       ) {
-        // Block unmasking until verified
         const key = await ensureVaultUnlocked();
         if (key) {
-          field.dataset.vaultmateUnmasked = "true"; // allow once
+          field.dataset.vaultmateUnmasked = "true";
         } else {
-          field.type = "password"; // revert if not authorized
+          field.type = "password";
           alert("VaultMate: Unlock required to view password.");
         }
       }
@@ -124,26 +158,21 @@ passwordFields.forEach((field) => {
   observer.observe(field, { attributes: true });
 });
 
-
-// Function to encrypt a password using the master password
+// --- Encrypt / Decrypt ---
 async function encryptPassword(masterPassword, plaintext) {
   const encoder = new TextEncoder();
-
-  // Generate a random salt
   const salt = window.crypto.getRandomValues(new Uint8Array(16));
 
-  // Derive key using PBKDF2
   const keyMaterial = await window.crypto.subtle.importKey(
-    "raw", encoder.encode(masterPassword), "PBKDF2", false, ["deriveKey"]
+    "raw",
+    encoder.encode(masterPassword),
+    "PBKDF2",
+    false,
+    ["deriveKey"]
   );
 
   const key = await window.crypto.subtle.deriveKey(
-    {
-      name: "PBKDF2",
-      salt: salt,
-      iterations: 300000,
-      hash: "SHA-256"
-    },
+    { name: "PBKDF2", salt, iterations: 300000, hash: "SHA-256" },
     keyMaterial,
     { name: "AES-GCM", length: 256 },
     true,
@@ -152,12 +181,11 @@ async function encryptPassword(masterPassword, plaintext) {
 
   const iv = window.crypto.getRandomValues(new Uint8Array(12));
   const encrypted = await window.crypto.subtle.encrypt(
-    { name: "AES-GCM", iv: iv },
+    { name: "AES-GCM", iv },
     key,
     encoder.encode(plaintext)
   );
 
-  // Return encrypted data as base64 with salt + iv
   return {
     ciphertext: btoa(String.fromCharCode(...new Uint8Array(encrypted))),
     salt: Array.from(salt),
@@ -165,20 +193,18 @@ async function encryptPassword(masterPassword, plaintext) {
   };
 }
 
-// Function to decrypt a password using the master password
-async function decryptPassword(masterPassword, encryptedObj) { // Ensure encryptedObj is in the expected format
+async function decryptPassword(masterPassword, encryptedObj) {
   const decoder = new TextDecoder();
-  const encoder = new TextEncoder(); // Use TextEncoder for consistent encoding
-
+  const encoder = new TextEncoder();
   const { ciphertext, salt, iv } = encryptedObj;
 
-  const keyMaterial = await window.crypto.subtle.importKey( 
+  const keyMaterial = await window.crypto.subtle.importKey(
     "raw",
     encoder.encode(masterPassword),
     "PBKDF2",
     false,
     ["deriveKey"]
-  ); // Import the master password as a key material
+  );
 
   const key = await window.crypto.subtle.deriveKey(
     {
@@ -191,7 +217,7 @@ async function decryptPassword(masterPassword, encryptedObj) { // Ensure encrypt
     { name: "AES-GCM", length: 256 },
     true,
     ["decrypt"]
-  ); // Derive the decryption key
+  );
 
   const decrypted = await window.crypto.subtle.decrypt(
     { name: "AES-GCM", iv: new Uint8Array(iv) },
@@ -200,10 +226,9 @@ async function decryptPassword(masterPassword, encryptedObj) { // Ensure encrypt
   );
 
   return decoder.decode(decrypted);
-} 
+}
 
-
-// Simple generator (reused from popup)
+// --- Generator ---
 function generatePassword(length) {
   const charset = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-=";
   let password = "";
@@ -214,32 +239,3 @@ function generatePassword(length) {
   }
   return password;
 }
-
-// Auto-fill functionality
-(async function autoFillVaultmate() {
-  const site = window.location.origin;
-
- chrome.storage.local.get(["vault_data"], async (res) => {
-  const vault = res.vault_data || {};
-  const entries = vault[window.location.origin];
-  if (!entries || entries.length === 0) return;
-
-  // 🔐 Ask for master password or use existing unlocked session
-  const masterKey = await ensureVaultUnlocked();
-  if (!masterKey) return; // user cancelled or invalid
-
-  // Proceed to decrypt the latest password
-  const latest = entries[entries.length - 1];
-  try {
-    const decrypted = await decryptPassword(masterKey, latest.password);
-    const field = document.querySelector('input[type="password"]');
-    if (field) {
-      field.value = decrypted;
-      console.log("🔓 VaultMate autofilled password");
-    }
-  } catch (err) {
-    console.error("❌ VaultMate failed to decrypt:", err);
-    alert("VaultMate: Incorrect master password or corrupt data.");
-  }
-  });
-})();
