@@ -1,5 +1,6 @@
 const MASTER_KEY_REQUIRED = false;
-const STATIC_DEV_KEY = "VAULTMATE_DEV_KEY";
+
+const STATIC_DEV_KEY = "vaultmate-dev";
 
 console.log("🔍 VaultMate content script loaded.");
 
@@ -10,34 +11,14 @@ async function getEncryptionKey() {
   return await ensureVaultUnlocked();
 }
 
-// Get master key from background (only used if needed)
+// Ensure Vault is Unlocked
 async function ensureVaultUnlocked() {
-  const isUnlocked = await new Promise((resolve) =>
-    chrome.runtime.sendMessage({ type: "IS_VAULT_UNLOCKED" }, (res) =>
-      resolve(res.unlocked)
-    )
-  );
+  if (!MASTER_KEY_REQUIRED) return "vaultmate-dev";
 
-  if (!isUnlocked) {
-    const masterPassword = prompt("VaultMate: Enter master password");
-    if (!masterPassword) return null;
-
-    await new Promise((resolve) =>
-      chrome.runtime.sendMessage(
-        { type: "UNLOCK_VAULT", key: masterPassword },
-        () => resolve()
-      )
-    );
-
-    return masterPassword;
-  }
-
-  return await new Promise((resolve) =>
-    chrome.runtime.sendMessage({ type: "GET_UNLOCK_KEY" }, (res) =>
-      resolve(res.key)
-    )
-  );
+  const masterPassword = prompt("VaultMate: Enter your master password to decrypt");
+  return masterPassword || null;
 }
+
 
 // --- Detect Password Fields and Inject Button ---
 const passwordFields = document.querySelectorAll('input[type="password"]');
@@ -67,36 +48,37 @@ passwordFields.forEach((field) => {
   btn.style.left = `${window.scrollX + rect.right + 5}px`;
 
   btn.addEventListener("click", async () => {
-    const password = generatePassword(16);
-    field.value = password;
+  const generatedPassword = generatePassword(16);
+  field.value = generatedPassword;
 
-    const key = await getEncryptionKey();
-    if (!key) return;
+  const masterPassword = "vaultmate-dev"; // Always use static for encryption
 
-    const usernameField = document.querySelector(
-      'input[type="email"], input[name*="user"], input[name*="email"], input[name*="login"], input[type="text"]'
-    );
-    const username = usernameField ? usernameField.value : null;
+  const usernameField = document.querySelector(
+    'input[type="email"], input[name*="user"], input[name*="email"], input[name*="login"], input[type="text"]'
+  );
+  const username = usernameField ? usernameField.value : null;
 
-    const encryptedPassword = await encryptPassword(key, password);
-    const encryptedUsername = username ? await encryptPassword(key, username) : null;
+  const encryptedPassword = await encryptPassword(masterPassword, generatedPassword);
+  const encryptedUsername = username
+    ? await encryptPassword(masterPassword, username)
+    : null;
 
-    const site = window.location.origin;
-    chrome.storage.local.get(["vault_data"], (res) => {
-      const vault = res.vault_data || {};
-      if (!vault[site]) vault[site] = [];
+  const site = window.location.origin;
+  chrome.storage.local.get(["vault_data"], (res) => {
+    const vault = res.vault_data || {};
+    if (!vault[site]) vault[site] = [];
 
-      vault[site].push({
-        password: encryptedPassword,
-        username: encryptedUsername,
-        created_at: new Date().toISOString()
-      });
+    vault[site].push({
+      password: encryptedPassword,
+      username: encryptedUsername,
+      created_at: new Date().toISOString()
+    });
 
-      chrome.storage.local.set({ vault_data: vault }, () => {
-        console.log("🔐 Credentials saved for", site);
-      });
+    chrome.storage.local.set({ vault_data: vault }, () => {
+      console.log("🔒 New credentials saved for", site);
     });
   });
+});
 
   document.body.appendChild(btn);
 });
@@ -110,30 +92,41 @@ passwordFields.forEach((field) => {
     const entries = vault[site];
     if (!entries || entries.length === 0) return;
 
-    const key = await getEncryptionKey();
-    if (!key) return;
-
     const latest = entries[entries.length - 1];
+
+    // Use static key or prompt depending on config
+    let masterKey = "vaultmate-dev";
+    if (MASTER_KEY_REQUIRED) {
+      masterKey = await ensureVaultUnlocked();
+      if (!masterKey) return; // User cancelled
+    }
+
     try {
-      const decryptedPassword = await decryptPassword(key, latest.password);
+      const decryptedPassword = await decryptPassword(masterKey, latest.password);
       const decryptedUsername = latest.username
-        ? await decryptPassword(key, latest.username)
+        ? await decryptPassword(masterKey, latest.username)
         : null;
 
-      const passField = document.querySelector('input[type="password"]');
-      if (passField) passField.value = decryptedPassword;
+      const passwordField = document.querySelector('input[type="password"]');
+      if (passwordField) passwordField.value = decryptedPassword;
 
-      const userField = document.querySelector(
+      const usernameField = document.querySelector(
         'input[type="email"], input[name*="user"], input[name*="email"], input[name*="login"], input[type="text"]'
       );
-      if (userField && decryptedUsername) userField.value = decryptedUsername;
+      if (usernameField && decryptedUsername) usernameField.value = decryptedUsername;
 
-      console.log("🔓 VaultMate autofilled");
+      console.log("✅ VaultMate autofilled credentials");
     } catch (err) {
-      console.error("❌ Autofill decryption failed", err);
+      console.error("❌ VaultMate failed to decrypt:", err);
+
+      if (MASTER_KEY_REQUIRED) {
+        alert("VaultMate: Incorrect master password or corrupt data.");
+      }
     }
   });
 })();
+
+
 
 // --- Unmask Protection (kept with master key) ---
 passwordFields.forEach((field) => {
